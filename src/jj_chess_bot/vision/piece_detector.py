@@ -7,14 +7,19 @@ import cv2
 import numpy as np
 import os
 import matplotlib.pyplot as plt
+import torch
+import torch.nn as nn
+from torchvision import transforms, models
+from PIL import Image
 
 class PieceDetector:
-    def __init__(self, template_dir_name="assets/templates"):
+    def __init__(self, template_dir_name="assets/templates",model_path="/Users/hpyi/Hobby/JJCC/assets/chess_model.pth", device=None):
         # 1. 动态获取项目根目录下的模板路径
         current_file_path = os.path.abspath(__file__)
         # 追溯路径: piece_detector.py -> vision -> jj_chess_bot -> src -> JJCC
         root_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(current_file_path))))
         self.template_dir = os.path.join(root_dir, template_dir_name)
+        # self.model_path = os.path.join(root_dir, model_path)
         print(f"模板目录路径: {self.template_dir}")
         # 2. 棋盘网格参数 (基于你的截图比例)
         self.grid_params = {
@@ -24,6 +29,23 @@ class PieceDetector:
             "grid_h": 88,   # 格子纵向间距
             "threshold": 0.2 # 匹配阈值 (0.0-1.0)
         }
+        # 3. 初始化模型
+        self.classifier = None
+        if model_path:
+            model_abs = model_path
+            self.classifier = PieceClassifier(model_abs)
+            if os.path.exists(model_abs):
+                try:
+                    self.classifier = PieceClassifier(model_abs)
+                    print(f"成功加载 CNN 模型: {model_abs}")
+                except Exception as e:
+                    print(f"错误: 加载模型时发生异常: {e}。将降级使用模板匹配。")
+                    self.classifier = None
+            else:
+                print(f"警告: 模型文件不存在: {model_abs}，将降级使用模板匹配。")
+        else:
+            print("警告: 未配置模型路径，使用模板匹配。")
+
         
         self.templates = {}
         self._load_templates()
@@ -82,8 +104,8 @@ class PieceDetector:
                 
                 roi = screen_img[y1:y2, x1:x2]
                 # 弹出窗口显示当前格子的内容
-                cv2.imshow("Current Grid ROI", roi)
-                key = cv2.waitKey(0) & 0xFF 
+                # cv2.imshow("Current Grid ROI", roi)
+                # key = cv2.waitKey(0) & 0xFF 
 
                 h, w = roi.shape[:2]
                 print(f"ROI 尺寸: 宽 {w} 高 {h}")
@@ -94,31 +116,36 @@ class PieceDetector:
                 # if roi.size == 0:
                 #     continue
 
-                # 3. 对该区域进行模板匹配
-                best_match = ""
-                max_val = -1
-                
-                for name, temp in self.templates.items():
-                    # 确保模板尺寸不大于 ROI 尺寸
-                    if temp.shape[0] > roi.shape[0] or temp.shape[1] > roi.shape[1]:
-                        t_h, t_w = roi.shape[:2]
-                        temp_resized = cv2.resize(temp, (t_w, t_h))
-                        res = cv2.matchTemplate(roi, temp_resized, cv2.TM_CCOEFF_NORMED)
+                # 3. 对该区域进行识别
+                if self.classifier:
+                    piece_name, confidence = self.classifier.predict(roi)
+                    print(f"使用 CNN 识别结果: {piece_name} (置信度: {confidence:.2f})")
+                    if confidence >= self.grid_params["threshold"]:
+                        board[row][col] = piece_name
                     else:
-                        res = cv2.matchTemplate(roi, temp, cv2.TM_CCOEFF_NORMED)
-                    
-                    _, val, _, _ = cv2.minMaxLoc(res)
-                    
-                    if val > max_val:
-                        max_val = val
-                        best_match = name
-                
-                # 4. 判定结果
-                if max_val >= self.grid_params["threshold"]:
-                    board[row][col] = best_match
+                        board[row][col] = "None"
                 else:
-                    board[row][col] = "None" # 代表空位
-                    
+                    # 降级使用模板匹配
+                    best_match = "None"
+                    max_val = 0
+                    roi_gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+                    for name, temp in self.templates.items():
+                        temp_gray = cv2.cvtColor(temp, cv2.COLOR_BGR2GRAY)
+                        
+                        # 确保尺寸一致
+                        if temp_gray.shape != roi_gray.shape:
+                            temp_gray = cv2.resize(temp_gray, (roi_gray.shape[1], roi_gray.shape[0]))
+                        res = cv2.matchTemplate(roi_gray, temp_gray, cv2.TM_CCOEFF_NORMED)
+                        _, val, _, _ = cv2.minMaxLoc(res)
+                        
+                        if val > max_val:
+                            max_val = val
+                            best_match = name
+                    print(f"模板匹配得分最高: {max_val:.3f}, 模板: {best_match}")
+                    if max_val >= self.grid_params["threshold"]:
+                        board[row][col] = best_match
+                    else:
+                        board[row][col] = "None"                
         return board
     def scan_board_optimized(self, img_path):
         screen_img = cv2.imread(img_path)
@@ -204,6 +231,7 @@ class PieceDetector:
         print("-----------------------\n")
 
     def generate_debug_image(self, img_path, board_matrix, conf_matrix):
+    
         """
         img_path: 原始截图路径
         board_matrix: scan_board 得到的 10x9 棋子名称矩阵
@@ -258,3 +286,87 @@ class PieceDetector:
         cv2.imshow("Full Board Debug", debug_img)
         cv2.waitKey(0)
         cv2.destroyAllWindows()
+
+    def matrix_to_fen(self, board, side_to_move='w'):
+        """
+        将 10x9 矩阵转换为 FEN 字符串
+        side_to_move: 'w' 代表红方先手, 'b' 代表黑方先手
+        """
+        # 建立映射表
+        mapping = {
+            "r_che": "R", "r_ma": "N", "r_xiang": "B", "r_shi": "A", "r_shuai": "K", "r_pao": "C", "r_bing": "P",
+            "b_che": "r", "b_ma": "n", "b_xiang": "b", "b_shi": "a", "b_jiang": "k", "b_pao": "c", "b_zu": "p",
+            "None": None, "": None  # 处理空位
+        }
+        
+        fen_rows = []
+        for row in board:
+            empty_count = 0
+            row_str = ""
+            for cell in row:
+                char = mapping.get(cell)
+                if char:
+                    # 如果之前有连续空位，先填入数字
+                    if empty_count > 0:
+                        row_str += str(empty_count)
+                        empty_count = 0
+                    row_str += char
+                else:
+                    empty_count += 1
+            
+            # 处理行末的空位
+            if empty_count > 0:
+                row_str += str(empty_count)
+            fen_rows.append(row_str)
+        
+        # 用 '/' 连接每一行，最后加上轮到谁走、回合数等信息（简化版）
+        fen_base = "/".join(fen_rows)
+        return f"{fen_base} {side_to_move} - - 0 1"
+class PieceClassifier:
+    def __init__(self, model_path, device=None):
+        # 1. 自动选择设备
+        self.device = device if device else torch.device("mps" if torch.backends.mps.is_available() else "cpu")
+        
+        # 2. 模型文件存在性检查
+        if not model_path or not os.path.exists(model_path):
+            raise FileNotFoundError(f"棋子模型文件未找到: {model_path}。请确保文件存在，或在 PieceDetector 中传入 model_path=None 以禁用 CNN。")
+        
+        # 3. 加载模型存档
+        checkpoint = torch.load(model_path, map_location=self.device)
+        self.class_names = checkpoint['class_names']
+        
+        # 3. 初始化模型结构 (需与训练时保持完全一致)
+        # 如果是棋子模型使用 MobileNetV3
+        self.model = models.mobilenet_v3_small()
+        self.model.classifier[3] = nn.Linear(self.model.classifier[3].in_features, len(self.class_names))
+        
+        # 4. 注入权重并设为评估模式
+        self.model.load_state_dict(checkpoint['model_state_dict'])
+        self.model.to(self.device)
+        self.model.eval()
+
+        # 5. 定义预处理转换 (必须与训练阶段完全相同)
+        self.transform = transforms.Compose([
+            transforms.Resize((90, 90)), # 对应你训练时的 IMG_SIZE
+            transforms.ToTensor(),
+        ])
+
+    def predict(self, roi_bgr):
+        """
+        输入: OpenCV 读取的 BGR 图片 (ROI)
+        返回: 类别名称和置信度
+        """
+        # OpenCV BGR 转 PIL RGB
+        roi_rgb = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2RGB)
+        pil_img = Image.fromarray(roi_rgb)
+        
+        # 预处理并增加 Batch 维度
+        input_tensor = self.transform(pil_img).unsqueeze(0).to(self.device)
+        
+        with torch.no_grad():
+            outputs = self.model(input_tensor)
+            # 使用 Softmax 转换为概率分布
+            probabilities = torch.nn.functional.softmax(outputs[0], dim=0)
+            conf, pred_idx = torch.max(probabilities, 0)
+            
+            return self.class_names[pred_idx.item()], conf.item()
