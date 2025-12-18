@@ -1,0 +1,8 @@
+# 象棋引擎配置
+engine:
+  # 引擎二进制文件的相对路径
+  path: "src/jj_chess_bot/engine/Pikafish/src/pikafish"
+  # 引擎思考深度，值越高棋力越强但耗时越久
+  depth: 15
+  # 引擎思考时间限制 (毫秒)
+  movetime: 2000
