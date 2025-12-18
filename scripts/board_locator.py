@@ -3,7 +3,7 @@ import numpy as np
 from matplotlib import pyplot as plt
 
 # 读取截图
-target_img = "/Users/hpyi/Hobby/JJCC/assets/screenshots/WeChat_JJ象棋_2802.png"
+target_img = "/Users/hpyi/Hobby/JJCC/assets/screenshots/AIRWeChat_JJ象棋_2802.png"
 img = cv2.imread(target_img)
 
 # 转为灰度
