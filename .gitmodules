@@ -1,0 +1,3 @@
+[submodule "src/jj_chess_bot/engine/Pikafish"]
+	path = src/jj_chess_bot/engine/Pikafish
+	url = git@github.com:official-pikafish/Pikafish.git
